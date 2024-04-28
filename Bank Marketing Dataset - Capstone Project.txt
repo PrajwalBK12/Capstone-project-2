@@ -1,0 +1,59 @@
+import pandas as pd
+import numpy as np
+import sagemaker
+from sagemaker.sklearn.estimator import SKLearn
+from sagemaker.tuner import IntegerParameter, CategoricalParameter, ContinuousParameter, HyperparameterTuner
+from sagemaker.transformer import Transformer
+
+# Load data
+df = pd.read_csv("https://raw.githubusercontent.com/stephenleo/sagemaker-deployment/main/data/final_project_bank.csv")
+
+# Data Exploration
+print(df.describe())
+print(df.isnull().sum())
+for col in df.select_dtypes(include=['object']).columns:
+    print(col, ':', df[col].unique())
+
+# Data Cleaning
+# Handling missing values
+df.fillna(method='ffill', inplace=True)  # Forward fill for missing categorical values
+df.fillna(df.mean(), inplace=True)  # Fill missing numerical values with mean
+
+# Feature Engineering
+# Encoding categorical variables
+df = pd.get_dummies(df)
+
+# Model Selection
+# Choose an appropriate model - for this example, we'll use a Random Forest Classifier
+model = SKLearn(entry_point='train.py', framework_version='0.23-1', role=sagemaker.get_execution_role(),
+                instance_count=1, instance_type='ml.m5.large')
+
+# Hyperparameter tuning
+hyperparameter_ranges = {
+    'n_estimators': IntegerParameter(10, 200),
+    'max_depth': IntegerParameter(3, 10),
+    'min_samples_split': IntegerParameter(2, 20),
+    'min_samples_leaf': IntegerParameter(1, 10)
+}
+
+objective_metric_name = 'validation:accuracy'
+tuner = HyperparameterTuner(model, objective_metric_name, hyperparameter_ranges, max_jobs=10, max_parallel_jobs=3)
+
+# Model training
+tuner.fit({'train': sagemaker.inputs.TrainingInput("s3://bucket/train_data.csv", content_type='text/csv')})
+
+# Deploy the best model as a serverless inference endpoint
+predictor = tuner.deploy(initial_instance_count=1, instance_type='ml.m5.large')
+
+# Batch transform
+transformer = Transformer(model_name=predictor.model_name, instance_count=1, instance_type='ml.m5.large', strategy='SingleRecord')
+transformer.transform(data="s3://bucket/input_data.jsonl", data_type='S3Prefix', content_type='application/jsonlines')
+transformer.wait()
+
+# Performance calculation
+output_data_path = transformer.output_path
+output_df = pd.read_csv(output_data_path, header=None)
+# Calculate performance metrics based on output_df
+
+# Delete endpoint
+predictor.delete_endpoint()
